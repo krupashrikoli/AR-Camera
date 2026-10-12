@@ -20,7 +20,9 @@ declare module 'mind-ar/dist/mindar-image-three.prod.js' {
     uiError?: string
     filterMinCF?: number | null
     filterBeta?: number | null
+    /** Consecutive detections required before target-found. */
     warmupTolerance?: number | null
+    /** Consecutive misses required before target-lost. */
     missTolerance?: number | null
     userDeviceId?: string | null
     environmentDeviceId?: string | null

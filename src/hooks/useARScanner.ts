@@ -4,6 +4,7 @@ import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js'
 import type { ExperienceConfig } from '../config/experience'
 import { checkBrowserSupport, lockBodyScroll } from '../utils/device'
 import { preloadMindAR, warmupExperienceAssets } from '../utils/arPreload'
+import { withRobustCameraConstraints } from '../utils/cameraConstraints'
 import {
   createARVideoElement,
   degToRad,
@@ -299,9 +300,9 @@ export function useARScanner(config: ExperienceConfig): UseARScannerResult {
     }
   }, [updateDebug])
 
-  /** Attach video plane immediately — do not wait for the full MP4 download. */
+  /** Build a shared video texture + plane; clone the plane onto every target anchor. */
   const attachVideoContent = useCallback(
-    (anchorGroup: THREE.Group, experience: ExperienceConfig) => {
+    (anchorGroups: THREE.Group[], experience: ExperienceConfig) => {
       const video = createARVideoElement(experience.videoSrc, {
         muted: experience.muteByDefault,
         loop: experience.videoLoop,
@@ -349,31 +350,35 @@ export function useARScanner(config: ExperienceConfig): UseARScannerResult {
         side: THREE.DoubleSide,
         toneMapped: false,
       })
-      const mesh = new THREE.Mesh(geometry, material)
 
-      const root = new THREE.Group()
-      root.position.set(
-        experience.position.x,
-        experience.position.y,
-        experience.position.z,
-      )
-      root.scale.set(experience.scale.x, experience.scale.y, experience.scale.z)
-      root.rotation.set(
-        degToRad(experience.rotation.x),
-        degToRad(experience.rotation.y),
-        degToRad(experience.rotation.z),
-      )
-      root.add(mesh)
+      const roots: THREE.Group[] = []
+      for (const anchorGroup of anchorGroups) {
+        const mesh = new THREE.Mesh(geometry, material)
+        const root = new THREE.Group()
+        root.position.set(
+          experience.position.x,
+          experience.position.y,
+          experience.position.z,
+        )
+        root.scale.set(experience.scale.x, experience.scale.y, experience.scale.z)
+        root.rotation.set(
+          degToRad(experience.rotation.x),
+          degToRad(experience.rotation.y),
+          degToRad(experience.rotation.z),
+        )
+        root.add(mesh)
+        anchorGroup.add(root)
+        roots.push(root)
+      }
 
-      contentRootRef.current = root
-      anchorGroup.add(root)
+      contentRootRef.current = roots[0] ?? null
       updateDebug({ mediaStatus: 'video_ready' })
     },
     [updateDebug],
   )
 
   const attachModelContent = useCallback(
-    async (anchorGroup: THREE.Group, experience: ExperienceConfig) => {
+    async (anchorGroups: THREE.Group[], experience: ExperienceConfig) => {
       const loader = new GLTFLoader()
       const gltf = await new Promise<Awaited<ReturnType<typeof loader.loadAsync>>>(
         (resolve, reject) => {
@@ -391,22 +396,28 @@ export function useARScanner(config: ExperienceConfig): UseARScannerResult {
         },
       )
 
-      const root = new THREE.Group()
-      root.position.set(
-        experience.position.x,
-        experience.position.y,
-        experience.position.z,
-      )
-      root.scale.set(experience.scale.x, experience.scale.y, experience.scale.z)
-      root.rotation.set(
-        degToRad(experience.rotation.x),
-        degToRad(experience.rotation.y),
-        degToRad(experience.rotation.z),
-      )
-      root.add(gltf.scene)
+      const roots: THREE.Group[] = []
+      for (let i = 0; i < anchorGroups.length; i++) {
+        const source = i === 0 ? gltf.scene : gltf.scene.clone(true)
+        const root = new THREE.Group()
+        root.position.set(
+          experience.position.x,
+          experience.position.y,
+          experience.position.z,
+        )
+        root.scale.set(experience.scale.x, experience.scale.y, experience.scale.z)
+        root.rotation.set(
+          degToRad(experience.rotation.x),
+          degToRad(experience.rotation.y),
+          degToRad(experience.rotation.z),
+        )
+        root.add(source)
+        anchorGroups[i].add(root)
+        roots.push(root)
+      }
 
       if (experience.playModelAnimations && gltf.animations.length > 0) {
-        const mixer = new THREE.AnimationMixer(gltf.scene)
+        const mixer = new THREE.AnimationMixer(roots[0]!)
         gltf.animations.forEach((clip) => {
           mixer.clipAction(clip).play()
         })
@@ -414,8 +425,7 @@ export function useARScanner(config: ExperienceConfig): UseARScannerResult {
         clockRef.current = new THREE.Clock()
       }
 
-      contentRootRef.current = root
-      anchorGroup.add(root)
+      contentRootRef.current = roots[0] ?? null
       updateDebug({ mediaStatus: 'model_ready' })
     },
     [updateDebug],
@@ -466,6 +476,7 @@ export function useARScanner(config: ExperienceConfig): UseARScannerResult {
       const { MindARThree } = await preloadMindAR()
       if (abort.signal.aborted || !mountedRef.current) return
 
+      const tracking = experience.tracking
       const mindarThree = new MindARThree({
         container,
         imageTargetSrc: experience.targetSrc,
@@ -473,8 +484,10 @@ export function useARScanner(config: ExperienceConfig): UseARScannerResult {
         uiLoading: 'no',
         uiScanning: 'no',
         uiError: 'no',
-        filterMinCF: 0.0001,
-        filterBeta: 0.001,
+        filterMinCF: tracking.filterMinCF,
+        filterBeta: tracking.filterBeta,
+        warmupTolerance: tracking.warmupTolerance,
+        missTolerance: tracking.missTolerance,
       }) as MindARThreeInstance
 
       // Prefer smoother mobile frames over retina sharpness.
@@ -482,14 +495,20 @@ export function useARScanner(config: ExperienceConfig): UseARScannerResult {
 
       mindarRef.current = mindarThree
       const { renderer, scene, camera } = mindarThree
-      const anchor = mindarThree.addAnchor(experience.targetIndex)
+
+      // One anchor per compiled variant (original / contrast / low-light / low-res).
+      const targetCount = Math.max(1, experience.targetCount)
+      const anchors = Array.from({ length: targetCount }, (_, index) =>
+        mindarThree.addAnchor(index),
+      )
+      const anchorGroups = anchors.map((anchor) => anchor.group)
+      const activeTargets = new Set<number>()
 
       // Content attaches without blocking the camera permission prompt.
       if (experience.contentType === 'video') {
-        attachVideoContent(anchor.group, experience)
+        attachVideoContent(anchorGroups, experience)
       } else {
-        // 3D can load in parallel with camera start.
-        void attachModelContent(anchor.group, experience).catch((error) => {
+        void attachModelContent(anchorGroups, experience).catch((error) => {
           const code =
             error && typeof error === 'object' && 'code' in error
               ? ((error as { code?: ScannerErrorCode }).code ?? 'model_invalid')
@@ -498,31 +517,40 @@ export function useARScanner(config: ExperienceConfig): UseARScannerResult {
         })
       }
 
-      anchor.onTargetFound = () => {
-        if (!mountedRef.current) return
-        setPhase('detected')
-        updateDebug({ detectionStatus: 'found' })
-        if (experience.contentType === 'video' && experience.videoAutoplay) {
-          void playMedia()
+      anchors.forEach((anchor, index) => {
+        anchor.onTargetFound = () => {
+          if (!mountedRef.current) return
+          activeTargets.add(index)
+          setPhase('detected')
+          updateDebug({
+            detectionStatus: `found:${index}`,
+            targetStatus: 'matched',
+          })
+          if (experience.contentType === 'video' && experience.videoAutoplay) {
+            void playMedia()
+          }
+          if (mixerRef.current && clockRef.current) {
+            clockRef.current.getDelta()
+          }
         }
-        if (mixerRef.current && clockRef.current) {
-          clockRef.current.getDelta()
-        }
-      }
 
-      anchor.onTargetLost = () => {
-        if (!mountedRef.current) return
-        setPhase('lost')
-        updateDebug({ detectionStatus: 'lost' })
-        if (
-          experience.contentType === 'video' &&
-          experience.pauseOnTrackingLost
-        ) {
-          pauseVideo(videoRef.current)
-          setIsPaused(true)
-          updateDebug({ mediaStatus: 'paused_tracking_lost' })
+        anchor.onTargetLost = () => {
+          if (!mountedRef.current) return
+          activeTargets.delete(index)
+          if (activeTargets.size > 0) return
+
+          setPhase('lost')
+          updateDebug({ detectionStatus: 'lost' })
+          if (
+            experience.contentType === 'video' &&
+            experience.pauseOnTrackingLost
+          ) {
+            pauseVideo(videoRef.current)
+            setIsPaused(true)
+            updateDebug({ mediaStatus: 'paused_tracking_lost' })
+          }
         }
-      }
+      })
 
       // Reveal camera feed as soon as the browser grants it — don't wait for tracker compile.
       void waitForCameraVideo(container, abort.signal).then(() => {
@@ -532,7 +560,9 @@ export function useARScanner(config: ExperienceConfig): UseARScannerResult {
         updateDebug({ cameraStatus: 'active', targetStatus: 'loading' })
       })
 
-      const startPromise = mindarThree.start()
+      const startPromise = withRobustCameraConstraints(tracking, () =>
+        mindarThree.start(),
+      )
       const timeoutPromise = new Promise<never>((_, reject) => {
         const timer = window.setTimeout(
           () =>

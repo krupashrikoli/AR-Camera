@@ -95,6 +95,8 @@ npm run compile:target
 npm run compile:target -- ./path/to/art.png ./public/targets/samraya.mind
 ```
 
+This builds **4 lighting/resolution variants** into one `.mind` file (original, contrast-enhanced, low-light, low-res friendly) so detection stays stronger in dim rooms and on weaker phone cameras. Keep `targetCount: 4` in `src/config/experience.ts` in sync with that compile.
+
 ### Option B — In-app browser compiler
 
 1. `npm run dev`

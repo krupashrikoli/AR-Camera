@@ -1,3 +1,5 @@
+import { robustTracking, type TrackingConfig } from './tracking'
+
 export type ContentType = 'video' | '3d'
 
 export type Vec3 = {
@@ -16,6 +18,11 @@ export type ExperienceConfig = {
   lostText: string
   targetSrc: string
   targetIndex: number
+  /**
+   * How many compiled image variants live in the .mind file.
+   * Robust builds use 4 (original, contrast, low-light, low-res).
+   */
+  targetCount: number
   contentType: ContentType
   videoSrc: string
   modelSrc: string
@@ -31,6 +38,7 @@ export type ExperienceConfig = {
   muteByDefault: boolean
   pauseOnTrackingLost: boolean
   playModelAnimations: boolean
+  tracking: TrackingConfig
 }
 
 export const DEFAULT_EXPERIENCE_ID = 'samraya'
@@ -45,11 +53,13 @@ export const experiences: Record<string, ExperienceConfig> = {
     brandName: 'GHD Hotels',
     experienceTitle: 'Samrāya',
     displayName: 'Samrāya Lifestyle and Wellness Resort',
-    instructionText: 'Point your camera at the artwork.',
+    instructionText: 'Point your camera at the artwork. Hold steady — closer helps in low light.',
     detectedText: 'Experience found.',
     lostText: 'Find the artwork again',
     targetSrc: '/targets/samraya.mind',
     targetIndex: 0,
+    // Compiled via `npm run compile:target` with 4 lighting/resolution variants.
+    targetCount: 4,
     contentType: 'video',
     videoSrc: '/videos/samraya.mp4',
     modelSrc: '/models/samraya.glb',
@@ -64,6 +74,7 @@ export const experiences: Record<string, ExperienceConfig> = {
     muteByDefault: true,
     pauseOnTrackingLost: true,
     playModelAnimations: true,
+    tracking: robustTracking,
   },
 }
 
@@ -89,6 +100,9 @@ export function validateExperienceConfig(config: ExperienceConfig): string[] {
   }
   if (config.targetIndex < 0 || !Number.isInteger(config.targetIndex)) {
     errors.push('Target index must be a non-negative integer.')
+  }
+  if (config.targetCount < 1 || !Number.isInteger(config.targetCount)) {
+    errors.push('Target count must be a positive integer.')
   }
   if (config.contentType !== 'video' && config.contentType !== '3d') {
     errors.push('Content type must be "video" or "3d".')
